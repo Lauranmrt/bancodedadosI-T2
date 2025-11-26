@@ -1,7 +1,6 @@
 CREATE DATABASE gerenciamento_de_biblioteca;
 USE gerenciamento_de_biblioteca;
 
-
 CREATE TABLE cargo (
     id INT PRIMARY KEY AUTO_INCREMENT,
     nome_cargo VARCHAR(50) NOT NULL UNIQUE
@@ -76,39 +75,15 @@ CREATE TABLE emprestimo (
 CREATE TABLE log_auditoria (
     id INT PRIMARY KEY AUTO_INCREMENT,
     acao VARCHAR(50),
-    usuario_afetado_id INT,
-    exemplar_afetado_id INT,
+    usuario_id INT,
+    usuario_nome VARCHAR(250),
+    exemplar_id INT,
+    titulo_exemplar VARCHAR(500),
     data_hora DATETIME DEFAULT CURRENT_TIMESTAMP,
-    detalhes VARCHAR(255)
+    detalhes TEXT
 );
 
-
--- INSERÇÃO DE DADOS:
-
-INSERT INTO cargo (nome_cargo) VALUES ('Bibliotecário'), ('Atendente');
-INSERT INTO autor (nome_autor) VALUES ('J.K. Rowling'), ('J.R.R. Tolkien'), ('Machado de Assis');
-INSERT INTO editora (nome_editora) VALUES ('Rocco'), ('HarperCollins'), ('Editora Globo');
-INSERT INTO genero (nome_genero) VALUES ('Fantasia'), ('Literatura Brasileira'), ('Aventura');
-
-INSERT INTO usuario (nome_usuario, email, cpf, telefone) VALUES 
-('Ana Bibliotecária', 'ana@lib.com', '111.111.111-11', '(66) 9999-1111'),
-('João Leitor', 'joao@mail.com', '222.222.222-22', '(66) 9999-2222');
-
-INSERT INTO funcionario (usuario_id, cargo_id, salario, login, senha) VALUES
-(1, 1, 3500.00, 'ana.lib', 'senha123');
-
--- Agora o INSERT funcionará para 1899
-INSERT INTO obra (titulo, autor_id, editora_id, genero_id, ano_lancamento, isbn) VALUES
-('Harry Potter e a Pedra Filosofal', 1, 1, 1, 1997, '978-8532511010'),
-('O Senhor dos Anéis', 2, 2, 1, 1954, '978-8595084742'),
-('Dom Casmurro', 3, 3, 2, 1899, '978-8525044648');
-
-INSERT INTO exemplar (obra_id, status_livro) VALUES (1, 'DISPONIVEL'), (1, 'DISPONIVEL'), (1, 'DISPONIVEL');
-INSERT INTO exemplar (obra_id, status_livro) VALUES (2, 'DISPONIVEL'), (2, 'DISPONIVEL');
-INSERT INTO exemplar (obra_id, status_livro) VALUES (3, 'DISPONIVEL');
-
 -- VIEWS
-
 CREATE VIEW vw_estoque_consolidado AS
 SELECT 
     o.id AS obra_id,
@@ -146,9 +121,7 @@ JOIN obra o ON e.obra_id = o.id
 WHERE emp.status_emprestimo = 'PENDENTE' 
 AND emp.data_previsao_devolucao < CURDATE();
 
-
 -- PROCEDURES
-
 DELIMITER $$
 
 CREATE PROCEDURE sp_registrar_emprestimo(IN p_usuario_id INT, IN p_obra_id INT)
@@ -191,30 +164,109 @@ END $$
 DELIMITER ;
 
 -- TRIGGERS
-
 DELIMITER $$
 
-CREATE TRIGGER trg_auditoria_emprestimo
+-- TRIGGER 1: INSERT
+CREATE TRIGGER trg_auditoria_emprestimo_insert
 AFTER INSERT ON emprestimo
 FOR EACH ROW
 BEGIN
-    INSERT INTO log_auditoria (acao, usuario_afetado_id, exemplar_afetado_id, detalhes)
+    DECLARE v_nome_usuario VARCHAR(250);
+    DECLARE v_titulo_obra VARCHAR(500);
+
+    SELECT nome_usuario INTO v_nome_usuario FROM usuario WHERE id = NEW.usuario_id;
+    SELECT o.titulo INTO v_titulo_obra FROM exemplar e JOIN obra o ON e.obra_id = o.id WHERE e.id = NEW.exemplar_id;
+
+    INSERT INTO log_auditoria (acao, usuario_id, usuario_nome, exemplar_id, titulo_exemplar, detalhes)
     VALUES (
-        'NOVO EMPRESTIMO', 
-        NEW.usuario_id, 
-        NEW.exemplar_id, 
-        CONCAT('Empréstimo registrado em ', DATE_FORMAT(NOW(), '%d/%m/%Y às %H:%i'))
+        'NOVO EMPRÉSTIMO', 
+        NEW.usuario_id,
+        v_nome_usuario,
+        NEW.exemplar_id,
+        v_titulo_obra,
+        CONCAT('Registro feito por: ', CURRENT_USER(), ' em ', DATE_FORMAT(NOW(), '%d/%m/%Y às %H:%i'))
     );
 END $$
 
-DELIMITER ;
+-- TRIGGER 2: UPDATE
+CREATE TRIGGER trg_auditoria_emprestimo_update
+AFTER UPDATE ON emprestimo
+FOR EACH ROW
+BEGIN
+    DECLARE acao_desc VARCHAR(50);
+    DECLARE detalhes_desc TEXT;
+    DECLARE v_nome_usuario VARCHAR(250);
+    DECLARE v_titulo_obra VARCHAR(500);
+
+    SELECT nome_usuario INTO v_nome_usuario FROM usuario WHERE id = NEW.usuario_id;
+    SELECT o.titulo INTO v_titulo_obra FROM exemplar e JOIN obra o ON e.obra_id = o.id WHERE e.id = NEW.exemplar_id;
+
+    IF OLD.status_emprestimo != 'DEVOLVIDO' AND NEW.status_emprestimo = 'DEVOLVIDO' THEN
+        SET acao_desc = 'DEVOLUÇÃO / BAIXA';
+        SET detalhes_desc = CONCAT('Devolvido em ', DATE_FORMAT(NEW.data_devolucao_real, '%d/%m/%Y'), ' por ', CURRENT_USER());
+    ELSE
+        SET acao_desc = 'ATUALIZAÇÃO CADASTRO';
+        SET detalhes_desc = CONCAT('Prev. Antiga: ', OLD.data_previsao_devolucao, ' -> Nova: ', NEW.data_previsao_devolucao);
+    END IF;
+
+    INSERT INTO log_auditoria (acao, usuario_id, usuario_nome, exemplar_id, titulo_exemplar, detalhes)
+    VALUES (acao_desc, NEW.usuario_id, v_nome_usuario, NEW.exemplar_id, v_titulo_obra, detalhes_desc);
+END $$
+
+-- TRIGGER 3: DELETE
+DELIMITER $$
+
+CREATE TRIGGER trg_auditoria_emprestimo_delete
+AFTER DELETE ON emprestimo
+FOR EACH ROW
+BEGIN
+    DECLARE v_nome_usuario VARCHAR(250);
+    DECLARE v_titulo_obra VARCHAR(500);
+
+    SELECT nome_usuario INTO v_nome_usuario FROM usuario WHERE id = OLD.usuario_id;
+    SELECT o.titulo INTO v_titulo_obra FROM exemplar e JOIN obra o ON e.obra_id = o.id WHERE e.id = OLD.exemplar_id;
 
 
+    UPDATE exemplar SET status_livro = 'DISPONIVEL' WHERE id = OLD.exemplar_id;
 
--- 7. SELECTS P/TESTE
+    INSERT INTO log_auditoria (acao, usuario_id, usuario_nome, exemplar_id, titulo_exemplar, detalhes)
+    VALUES (
+        'REMOÇÃO DE REGISTRO', 
+        OLD.usuario_id, 
+        v_nome_usuario, 
+        OLD.exemplar_id, 
+        v_titulo_obra, 
+        CONCAT('Registro apagado e exemplar liberado por ', CURRENT_USER())
+    );
+END $$
 
-SELECT * FROM vw_estoque_consolidado WHERE obra_id = 1;
+-- TESTES
+INSERT INTO cargo (nome_cargo) VALUES ('Bibliotecário'), ('Atendente');
+INSERT INTO autor (nome_autor) VALUES ('J.K. Rowling'), ('J.R.R. Tolkien'), ('Machado de Assis');
+INSERT INTO editora (nome_editora) VALUES ('Rocco'), ('HarperCollins'), ('Editora Globo');
+INSERT INTO genero (nome_genero) VALUES ('Fantasia'), ('Literatura Brasileira'), ('Aventura');
+
+INSERT INTO usuario (nome_usuario, email, cpf, telefone) VALUES 
+('Ana Bibliotecária', 'ana@lib.com', '111.111.111-11', '(66) 9999-1111'),
+('João Leitor', 'joao@mail.com', '222.222.222-22', '(66) 9999-2222');
+
+INSERT INTO funcionario (usuario_id, cargo_id, salario, login, senha) VALUES
+(1, 1, 3500.00, 'ana.lib', 'senha123');
+
+INSERT INTO obra (titulo, autor_id, editora_id, genero_id, ano_lancamento, isbn) VALUES
+('Harry Potter e a Pedra Filosofal', 1, 1, 1, 1997, '978-8532511010'),
+('O Senhor dos Anéis', 2, 2, 1, 1954, '978-8595084742'),
+('Dom Casmurro', 3, 3, 2, 1899, '978-8525044648');
+
+INSERT INTO exemplar (obra_id, status_livro) VALUES (1, 'DISPONIVEL'), (1, 'DISPONIVEL'), (1, 'DISPONIVEL');
+INSERT INTO exemplar (obra_id, status_livro) VALUES (2, 'DISPONIVEL'), (2, 'DISPONIVEL');
+
+-- SELECTS:
 CALL sp_registrar_emprestimo(2, 1);
-SELECT * FROM vw_estoque_consolidado WHERE obra_id = 1;
-SELECT * FROM exemplar WHERE obra_id = 1;
+CALL sp_registrar_emprestimo(2, 2);
+UPDATE emprestimo SET data_previsao_devolucao = '2025-10-10' WHERE id = 2;
+DELETE FROM emprestimo WHERE id = 2;
+
 SELECT * FROM log_auditoria;
+SELECT * FROM exemplar WHERE obra_id = 1;
+SELECT * FROM vw_estoque_consolidado
